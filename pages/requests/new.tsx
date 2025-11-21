@@ -1,165 +1,140 @@
-// pages/requests/new.tsx
-
+import { useState } from 'react';
 import { useRouter } from 'next/router';
-import { useState, useEffect } from 'react';
-import { getMockUser } from '@/utils/auth'; 
 import Link from 'next/link';
+import { getMockUser } from '@/utils/auth';
+
+interface FileAttachment { name: string; data: string; }
+
+const convertFilesToBase64 = (files: FileList | null): Promise<FileAttachment[]> => {
+    return new Promise((resolve) => {
+        if (!files || files.length === 0) return resolve([]);
+        const filePromises = Array.from(files).map(file => {
+            return new Promise<FileAttachment>((res) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => res({ name: file.name, data: reader.result as string });
+                reader.onerror = () => res({ name: file.name, data: 'Error reading file' });
+            });
+        });
+        Promise.all(filePromises).then(resolve);
+    });
+};
 
 export default function NewRequestPage() {
     const router = useRouter();
-    const [user, setUser] = useState<any>(null);
-    
-    // Состояние для полей формы
     const [destination, setDestination] = useState('');
     const [purpose, setPurpose] = useState('');
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
-    const [costEstimate, setCostEstimate] = useState('');
+    const [costEstimate, setCostEstimate] = useState<number>(0);
+    const [passportFiles, setPassportFiles] = useState<FileList | null>(null);
 
-    useEffect(() => {
-        const loggedInUser = getMockUser();
-        // Разрешаем создавать заявки только сотрудникам
-        if (!loggedInUser || loggedInUser.role !== 'employee') {
-            router.replace('/dashboard');
-            return;
-        }
-        setUser(loggedInUser);
-    }, [router]);
-
-    if (!user) {
-        return <div className="min-h-screen bg-gray-50 p-8">Загрузка...</div>;
-    }
+    const user = typeof window !== 'undefined' ? getMockUser() : null;
     
-    // --- Логика отправки формы ---
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (!user) return alert("Войдите в систему");
 
-        // Простая валидация
-        if (!destination || !purpose || !startDate || !endDate || !costEstimate) {
-            alert('Пожалуйста, заполните все поля.');
-            return;
-        }
+        let passportPayload: FileAttachment[] = [];
+        if (passportFiles) passportPayload = await convertFilesToBase64(passportFiles);
 
-        const payload = {
-            created_by_id: user.id,
-            created_by_role: user.role,
-            destination,
-            purpose,
-            start_date: startDate,
-            end_date: endDate,
-            cost_estimate: parseFloat(costEstimate),
-        };
-        
         try {
-            // POST-запрос на /api/requests для создания новой заявки
-            const response = await fetch('/api/requests', {
+            const res = await fetch('/api/requests', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(payload),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    employee_id: user.id,
+                    destination, purpose, start_date: startDate, end_date: endDate, 
+                    cost_estimate: costEstimate, passport_photos: passportPayload
+                }),
             });
 
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.message || 'Ошибка при создании заявки');
+            if (res.ok) { 
+                alert('Заявка создана и отправлена менеджеру!'); 
+                router.push('/dashboard'); 
+            } 
+            else { 
+                const errorData = await res.json();
+                alert(`Ошибка создания: ${errorData.message || res.statusText}`); 
             }
-
-            const result = await response.json();
-            alert(`Заявка №${result.new_id} успешно создана и отправлена на согласование!`);
-
-            // Перенаправляем на Dashboard
-            router.push('/dashboard');
-
-        } catch (error: any) {
-            console.error('Ошибка при создании заявки:', error.message);
-            alert(`Ошибка: ${error.message}`);
+        } catch (error) { 
+            alert('Ошибка сети или сервера.'); 
         }
     };
 
     return (
         <div className="min-h-screen bg-gray-50 p-6">
-            <div className="max-w-3xl mx-auto bg-white shadow-xl rounded-lg p-8">
-                <Link href="/dashboard" className="text-sky-600 hover:text-sky-800 text-sm mb-6 inline-block">
-                    ← Назад к Dashboard
-                </Link>
-                <h1 className="text-3xl font-bold mb-6 text-sky-800">Создание новой заявки</h1>
+            <div className="bg-white shadow p-8 max-w-2xl mx-auto rounded-lg">
+                <Link href="/dashboard" className="text-sky-600 mb-4 inline-block">← Назад</Link>
+                <h1 className="text-2xl font-bold mb-6 text-sky-800">Новая заявка на командировку</h1>
                 
-                <form onSubmit={handleSubmit} className="space-y-6">
-                    <div>
-                        <label htmlFor="destination" className="block text-sm font-medium text-gray-700">
-                            Место назначения (Город/Страна)
-                        </label>
-                        <input
-                            type="text"
-                            id="destination"
-                            value={destination}
-                            onChange={(e) => setDestination(e.target.value)}
-                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-3 focus:ring-sky-500 focus:border-sky-500"
-                            required
-                        />
-                    </div>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    
+                    <label className="block text-sm font-medium text-gray-700">Направление</label>
+                    <input 
+                        className="w-full border p-3 rounded-lg focus:ring-sky-500 focus:border-sky-500" 
+                        placeholder="Город, Страна" 
+                        value={destination} 
+                        onChange={e => setDestination(e.target.value)} 
+                        required 
+                    />
 
-                    <div>
-                        <label htmlFor="purpose" className="block text-sm font-medium text-gray-700">
-                            Цель поездки
-                        </label>
-                        <textarea
-                            id="purpose"
-                            rows={3}
-                            value={purpose}
-                            onChange={(e) => setPurpose(e.target.value)}
-                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-3 focus:ring-sky-500 focus:border-sky-500"
-                            required
-                        />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-6">
+                    <label className="block text-sm font-medium text-gray-700">Цель командировки</label>
+                    <textarea 
+                        className="w-full border p-3 rounded-lg h-24 focus:ring-sky-500 focus:border-sky-500" 
+                        placeholder="Подробное описание" 
+                        value={purpose} 
+                        onChange={e => setPurpose(e.target.value)} 
+                        required 
+                    />
+                    
+                    <div className="grid grid-cols-2 gap-4">
                         <div>
-                            <label htmlFor="startDate" className="block text-sm font-medium text-gray-700">
-                                Дата начала
-                            </label>
-                            <input
-                                type="date"
-                                id="startDate"
-                                value={startDate}
-                                onChange={(e) => setStartDate(e.target.value)}
-                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-3 focus:ring-sky-500 focus:border-sky-500"
-                                required
+                            <label className="block text-sm font-medium text-gray-700">Дата начала</label>
+                            <input 
+                                type="date" 
+                                className="w-full border p-3 rounded-lg" 
+                                value={startDate} 
+                                onChange={e => setStartDate(e.target.value)} 
+                                required 
                             />
                         </div>
                         <div>
-                            <label htmlFor="endDate" className="block text-sm font-medium text-gray-700">
-                                Дата окончания
-                            </label>
-                            <input
-                                type="date"
-                                id="endDate"
-                                value={endDate}
-                                onChange={(e) => setEndDate(e.target.value)}
-                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-3 focus:ring-sky-500 focus:border-sky-500"
-                                required
+                            <label className="block text-sm font-medium text-gray-700">Дата окончания</label>
+                            <input 
+                                type="date" 
+                                className="w-full border p-3 rounded-lg" 
+                                value={endDate} 
+                                onChange={e => setEndDate(e.target.value)} 
+                                required 
                             />
                         </div>
                     </div>
 
-                    <div>
-                        <label htmlFor="costEstimate" className="block text-sm font-medium text-gray-700">
-                            Предварительный бюджет (₽)
-                        </label>
-                        <input
-                            type="number"
-                            id="costEstimate"
-                            value={costEstimate}
-                            onChange={(e) => setCostEstimate(e.target.value)}
-                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-3 focus:ring-sky-500 focus:border-sky-500"
-                            required
+                    <label className="block text-sm font-medium text-gray-700">Ориентировочный бюджет (₽)</label>
+                    <input 
+                        type="number" 
+                        className="w-full border p-3 rounded-lg focus:ring-sky-500 focus:border-sky-500" 
+                        placeholder="Бюджет" 
+                        value={costEstimate || ''} 
+                        onChange={e => setCostEstimate(Number(e.target.value))} 
+                        required 
+                        min="1"
+                    />
+
+                    <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                        <label className="block text-sm font-bold text-yellow-800 mb-2">Паспортные данные (сканы/фото)</label>
+                        <input 
+                            type="file" 
+                            multiple 
+                            onChange={e => setPassportFiles(e.target.files)} 
+                            className="text-sm w-full file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-yellow-100 file:text-yellow-700 hover:file:bg-yellow-200"
                         />
                     </div>
 
-                    <button
-                        type="submit"
-                        className="w-full py-3 px-4 border border-transparent rounded-md shadow-sm text-lg font-medium text-white bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition duration-150"
+                    <button 
+                        type="submit" 
+                        className="w-full bg-sky-600 text-white p-3 rounded-lg font-semibold hover:bg-sky-700 transition"
                     >
                         Отправить на согласование
                     </button>

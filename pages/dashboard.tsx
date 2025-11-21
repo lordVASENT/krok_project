@@ -1,201 +1,144 @@
-// pages/dashboard.tsx
-
+import { getMockUser, logout } from '@/utils/auth'; 
+import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useState } from 'react';
-// ИМПОРТИРУЕМ mockLogout
-import { getMockUser, UserRole, mockLogout } from '@/utils/auth'; 
-import Link from 'next/link';
+import { RequestData } from './api/requests';
 
-// --- Типы ---
-interface RequestData {
-    id: number;
-    created_by_id: number;
-    created_by_role: 'employee' | 'manager' | 'hr' | 'finance';
-    status: 'awaiting_manager' | 'awaiting_hr' | 'awaiting_finance' | 'approved' | 'rejected' | 'created';
-    current_approver_role: UserRole;
-}
-
-// --- Компонент Dashboard ---
-export default function Dashboard() {
-    const router = useRouter();
-    const [user, setUser] = useState<any>(null);
-    const [activeTab, setActiveTab] = useState<'my' | 'awaiting' | 'archive'>('my');
+const RequestCard = ({ request, userId }: { request: RequestData, userId: number }) => {
+    let statusColor = 'bg-orange-100 text-orange-800';
+    let statusText = '';
     
-    // Изначально пустой массив, данные будут загружаться из API
-    const [requests, setRequests] = useState<RequestData[]>([]); 
+    // Определяем статус и цвет
+    if (request.status === 'rejected') { statusColor = 'bg-red-100 text-red-800'; statusText = 'ОТКЛОНЕНА'; } 
+    else if (request.status === 'awaiting_employee_action') { statusColor = 'bg-purple-100 text-purple-800'; statusText = 'НА ВЫПОЛНЕНИИ'; } 
+    else if (request.status === 'awaiting_report_approval') { statusColor = 'bg-yellow-100 text-yellow-800'; statusText = 'ОТЧЕТ НА ПРОВЕРКЕ'; } 
+    else if (request.status === 'completed') { statusColor = 'bg-green-100 text-green-800'; statusText = 'ЗАВЕРШЕНА'; } 
+    else if (request.status === 'created') { statusColor = 'bg-red-200 text-red-900'; statusText = `ТРЕБУЕТ ДОРАБОТКИ`; } 
+    else if (request.status.startsWith('awaiting')) { statusColor = 'bg-blue-100 text-blue-800'; statusText = `ОЖИДАЕТ ${request.current_approver_role.toUpperCase()}`; }
+    else { statusText = request.status.toUpperCase(); }
 
-    // --- ФУНКЦИЯ ВЫХОДА ---
-    const handleLogout = () => {
-        // ИСПОЛЬЗУЕМ ИМПОРТИРОВАННУЮ ФУНКЦИЮ ДЛЯ КОРРЕКТНОГО УДАЛЕНИЯ КЛЮЧА
-        mockLogout(); 
-        // Перенаправление на страницу входа
-        router.push('/login');
+    // Логика колокольчика: есть изменения И изменены не мной И я еще не видел
+    const showBell = request.is_modified && request.last_modified_actor_id !== userId && !request.viewed_by_ids.includes(userId);
+
+    return (
+        <Link href={`/requests/${request.id}`} className="block border rounded-lg shadow hover:shadow-lg transition bg-white p-4">
+            <div className="flex justify-between mb-2">
+                <span className={`text-xs font-bold px-2 py-1 rounded ${statusColor}`}>{statusText}</span>
+                {showBell && <span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full text-xs font-bold animate-pulse">🔔 Обновлено</span>}
+            </div>
+            <h3 className="font-bold text-gray-800 mt-2">{request.destination}</h3>
+            <p className="text-sm text-gray-500">{request.start_date} — {new Intl.NumberFormat('ru-RU').format(request.cost_estimate)} ₽</p>
+        </Link>
+    );
+};
+
+export default function Dashboard() {
+    const [user, setUser] = useState<any>(null);
+    const [activeTab, setActiveTab] = useState('my_requests');
+    const [requests, setRequests] = useState<RequestData[]>([]);
+    const router = useRouter();
+
+    const fetchData = () => {
+        fetch('/api/requests')
+            .then(r => r.json())
+            .then(setRequests)
+            .catch(err => {
+                console.error("Ошибка загрузки заявок:", err);
+                alert("Не удалось загрузить данные. Проверьте серверные API.");
+            });
     };
-    // ------------------------
 
-    // 1. Проверка авторизации и ЗАГРУЗКА ДАННЫХ ИЗ API
     useEffect(() => {
-        const loggedInUser = getMockUser();
-        if (!loggedInUser) {
-            router.replace('/login');
-            return;
-        }
-        setUser(loggedInUser);
+        const u = getMockUser();
+        if (!u) { router.replace('/login'); return; }
+        setUser(u);
+        
+        if (u.role !== 'employee') setActiveTab('awaiting_approval');
 
-        // Функция для загрузки данных
-        const fetchRequests = async () => {
-            try {
-                const response = await fetch('/api/requests');
-                if (!response.ok) {
-                    throw new Error('Failed to fetch requests from API.');
-                }
-                const data: RequestData[] = await response.json();
-                setRequests(data);
-            } catch (error) {
-                console.error("Error fetching requests:", error);
-                setRequests([]);
-            }
-        };
-
-        fetchRequests();
+        fetchData();
     }, [router]);
     
-    // Ранний выход, пока user не загружен
-    if (!user) {
-        return <div className="min-h-screen bg-gray-50 p-8">Загрузка...</div>;
-    }
-
-    // --- Логика фильтрации ---
-    const filteredRequests = requests.filter(request => {
-        if (activeTab === 'my') {
-            return request.created_by_id === user.id; 
-        }
-        if (activeTab === 'awaiting') {
-            return (
-                request.status.startsWith('awaiting_') &&
-                request.current_approver_role === user.role
-            );
-        }
-        if (activeTab === 'archive') {
-            return request.status === 'approved' || request.status === 'rejected';
-        }
-        return false;
-    });
-
-    const isEmployee = user.role === 'employee';
+    const getFilteredRequests = (tab: string) => {
+        if (!user) return [];
+        return requests.filter(req => {
+            const isCreator = req.employee_id === user.id;
+            
+            // Заявка, в которой согласующий участвовал
+            const isParticipated = req.approvals.some(a => a.approver_role === user.role);
+            
+            // Мои заявки: Те, что я создал
+            if (tab === 'my_requests') {
+                return isCreator && req.status !== 'completed' && req.status !== 'rejected';
+            }
+            
+            // Ожидают меня: Те, где я текущий согласующий
+            if (tab === 'awaiting_approval') {
+                return req.current_approver_role === user.role && req.status !== 'completed';
+            }
+            
+            // Все, что касается моей работы (для согласующих)
+            if (tab === 'all_active_by_role') {
+                // Отображаем все, что ожидает меня И все, что я когда-либо одобрял/отклонял/модифицировал
+                return (isParticipated || isCreator) && req.status !== 'completed' && req.status !== 'rejected';
+            }
+            
+            // Архив: Завершенные или отклоненные
+            if (tab === 'archive') {
+                return (isCreator || isParticipated) && (req.status === 'completed' || req.status === 'rejected');
+            }
+            return false;
+        });
+    };
     
+    // В зависимости от роли, устанавливаем вкладки
+    const isApproverRole = user && user.role !== 'employee';
+    const activeRequestsKey = isApproverRole ? 'all_active_by_role' : 'my_requests';
+    if (isApproverRole && activeTab === 'my_requests') setActiveTab('all_active_by_role');
+    
+    const displayRequests = getFilteredRequests(activeTab);
+
+    if (!user) return <div className="p-8">Загрузка...</div>;
+
     return (
         <div className="min-h-screen bg-gray-50 p-6">
-            <div className="max-w-7xl mx-auto">
-                
-                {/* --- HEADER: Название и Выход --- */}
-                <div className="flex justify-between items-center mb-6 border-b pb-4">
-                    <h1 className="text-3xl font-bold text-sky-800">Рабочий стол</h1>
-                    <div className="flex items-center space-x-4">
-                        <span className="text-gray-600">
-                            {user.name} ({user.role.toUpperCase()})
-                        </span>
-                        <button
-                            onClick={handleLogout}
-                            className="text-red-600 hover:text-red-800 transition font-semibold"
-                        >
-                            Выход
-                        </button>
+            <div className="max-w-6xl mx-auto">
+                <header className="flex justify-between items-center mb-8 border-b pb-4">
+                    <h1 className="text-2xl font-bold text-sky-700">Рабочий стол ({user.role === 'hr' ? 'Travel Coordinator' : user.role})</h1>
+                    <div className='flex items-center gap-4'>
+                        <span className='text-sm text-gray-600'>Привет, {user.name}!</span>
+                        <button onClick={logout} className="text-red-600 border px-3 py-1 rounded hover:bg-red-50 transition">Выход</button>
                     </div>
-                </div>
-
-                {/* --- Кнопка создания заявки --- */}
-                <div className="flex justify-end mb-6">
-                    {isEmployee && (
-                        <Link href="/requests/new" className="bg-sky-600 text-white px-4 py-2 rounded-lg hover:bg-sky-700 transition font-semibold">
-                            + Создать заявку
-                        </Link>
-                    )}
-                </div>
-
-                {/* --- Навигация по вкладкам --- */}
-                <div className="border-b border-gray-200 mb-6">
-                    <nav className="-mb-px flex space-x-8">
-                        <button
-                            onClick={() => setActiveTab('my')}
-                            className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition ${
-                                activeTab === 'my'
-                                    ? 'border-sky-500 text-sky-600'
-                                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                            }`}
-                        >
-                            Мои заявки ({requests.filter(r => r.created_by_id === user.id).length})
-                        </button>
-
-                        {user.role !== 'employee' && (
-                            <button
-                                onClick={() => setActiveTab('awaiting')}
-                                className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition ${
-                                    activeTab === 'awaiting'
-                                        ? 'border-orange-500 text-orange-600'
-                                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                                }`}
-                            >
-                                Ожидают согласования ({requests.filter(r => r.status.startsWith('awaiting_') && r.current_approver_role === user.role).length})
-                            </button>
-                        )}
-                        
-                        <button
-                            onClick={() => setActiveTab('archive')}
-                            className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition ${
-                                activeTab === 'archive'
-                                    ? 'border-green-500 text-green-600'
-                                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                            }`}
-                        >
-                            Архив
-                        </button>
-                    </nav>
-                </div>
+                </header>
                 
-                {/* --- Список заявок --- */}
-                <div className="bg-white shadow overflow-hidden sm:rounded-lg">
-                    {filteredRequests.length === 0 ? (
-                        <p className="p-6 text-gray-500">
-                            {activeTab === 'my' ? 'У вас пока нет созданных заявок.' : 'Нет заявок, ожидающих вашего действия.'}
-                        </p>
-                    ) : (
-                        <ul className="divide-y divide-gray-200">
-                            {filteredRequests.map(request => (
-                                <li key={request.id}>
-                                    <Link href={`/requests/${request.id}`} className="block hover:bg-gray-50 transition duration-150">
-                                        <div className="px-4 py-4 sm:px-6 flex items-center justify-between">
-                                            <div className="flex min-w-0 flex-1 items-center">
-                                                <div className="min-w-0 flex-1 px-4 md:grid md:grid-cols-3 md:gap-4">
-                                                    <p className="text-sm font-medium text-sky-600 truncate">Заявка №{request.id}</p>
-                                                    <p className="mt-2 flex items-center text-sm text-gray-500">
-                                                        <span>
-                                                            Создана: {request.created_by_role.toUpperCase()}
-                                                        </span>
-                                                    </p>
-                                                    <div className="mt-2 flex items-center text-sm text-gray-500">
-                                                        <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                                                            request.status === 'approved' ? 'bg-green-100 text-green-800' :
-                                                            request.status === 'rejected' ? 'bg-red-100 text-red-800' :
-                                                            'bg-yellow-100 text-yellow-800'
-                                                        }`}>
-                                                            {request.status.toUpperCase()}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <svg className="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                                    <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                                                </svg>
-                                            </div>
-                                        </div>
-                                    </Link>
-                                </li>
-                            ))}
-                        </ul>
+                <div className="flex gap-4 mb-6 border-b">
+                    {user.role === 'employee' && (
+                        <button onClick={() => setActiveTab('my_requests')} className={`pb-2 ${activeTab === 'my_requests' ? 'border-b-2 border-sky-500 font-semibold' : 'text-gray-600'}`}>Мои заявки</button>
+                    )}
+                    {isApproverRole && (
+                        <>
+                            <button onClick={() => setActiveTab('awaiting_approval')} className={`pb-2 ${activeTab === 'awaiting_approval' ? 'border-b-2 border-sky-500 font-semibold' : 'text-gray-600'}`}>Ожидают меня ({getFilteredRequests('awaiting_approval').length})</button>
+                            <button onClick={() => setActiveTab('all_active_by_role')} className={`pb-2 ${activeTab === 'all_active_by_role' ? 'border-b-2 border-sky-500 font-semibold' : 'text-gray-600'}`}>Все активные</button>
+                        </>
+                    )}
+                    <button onClick={() => setActiveTab('archive')} className={`pb-2 ${activeTab === 'archive' ? 'border-b-2 border-sky-500 font-semibold' : 'text-gray-600'}`}>Архив</button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                    {displayRequests.map(req => <RequestCard key={req.id} request={req} userId={user.id} />)}
+                    {displayRequests.length === 0 && (
+                        <div className="col-span-full p-10 text-center text-gray-500 bg-white rounded-lg border">
+                            Нет заявок в этой категории.
+                            {user.role === 'employee' && activeTab === 'my_requests' && (
+                                <p className='mt-2'>Нажмите '+' для создания новой заявки.</p>
+                            )}
+                        </div>
                     )}
                 </div>
+                {user.role === 'employee' && (
+                    <Link href="/requests/new" className="fixed bottom-8 right-8 bg-sky-600 text-white p-4 rounded-full shadow-lg text-2xl hover:bg-sky-700 transition">
+                        +
+                    </Link>
+                )}
             </div>
         </div>
     );
